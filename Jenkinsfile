@@ -34,21 +34,45 @@ pipeline {
             }
         }
 
-        stage('Configure AWS') {
+        stage('Configure EKS Access') {
+            when {
+                allOf {
+                    expression { params.action == 'apply' }
+                    expression { env.TF_CHANGES == "true" }
+                }
+            }
             steps {
-                withCredentials([usernamePassword(
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
                     credentialsId: 'aws-creds',
-                    usernameVariable: 'AWS_ACCESS_KEY_ID',
-                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                )]) {
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                ]]) {
                     sh '''
-                        aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
-                        aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
-                        aws configure set region $AWS_DEFAULT_REGION
+                        CALLER=$(aws sts get-caller-identity --query Arn --output text)
+                        echo "Logged in as: $CALLER"
 
-                        # Verify credentials work
-                        aws sts get-caller-identity
-                        echo "✅ AWS configured successfully"
+                        aws eks create-access-entry \
+                        --cluster-name $CLUSTER_NAME \
+                        --principal-arn $CALLER \
+                        --type STANDARD \
+                        --region $AWS_DEFAULT_REGION || echo "Access entry may already exist"
+
+                        aws eks associate-access-policy \
+                        --cluster-name $CLUSTER_NAME \
+                        --principal-arn $CALLER \
+                        --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+                        --access-scope '{"type":"cluster"}' \
+                        --region $AWS_DEFAULT_REGION || echo "Policy may already be associated"
+
+                        aws eks update-kubeconfig \
+                        --name $CLUSTER_NAME \
+                        --region $AWS_DEFAULT_REGION
+
+                        echo "Waiting 30s for nodes to be ready..."
+                        sleep 30
+                        kubectl get nodes
+                        echo "✅ EKS cluster is ready!"
                     '''
                 }
             }
